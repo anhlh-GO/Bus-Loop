@@ -26,6 +26,15 @@ import homeUrl from './assets/home.jpg';
 import albumUrl from './assets/collection.jpg';
 import loadingUrl from './assets/loading.jpg';
 import settingsUrl from './assets/settings.jpg';
+import iconUrl from './assets/icon.png';
+
+// the home-screen icon for iPhone "Add to Home Screen" (inlined, so the build stays one file)
+{
+  const link = document.createElement('link');
+  link.rel = 'apple-touch-icon';
+  link.href = iconUrl;
+  document.head.appendChild(link);
+}
 import bBroomUrl from './assets/b_broom.png';
 import bShuffleUrl from './assets/b_shuffle.png';
 import bMagnetUrl from './assets/b_magnet.png';
