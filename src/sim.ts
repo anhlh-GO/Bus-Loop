@@ -933,6 +933,8 @@ export class Sim {
   private finish(b: SimBus, ev: SimEvent[]): void {
     b.group = [];
     b.phase = 'search';
+    // full: no more crawling past the crowd, it heads for the way out at cruising speed
+    b.busy = false;
     // a bus on the road drives on to the way out in its place in the line; one still entering just goes
     if (b.where === 'road') {
       b.where = 'exit';
@@ -1054,8 +1056,8 @@ export class Sim {
     const road = this.onRoad();
     if (road.some((b) => b.where === 'enter' || b.phase === 'boarding' || b.cap <= 0 || this.units[b.color] === 0)) return false;
     if (this.anyTap()) return false;
-    // a bus waits for a slot and + can still open one (free, up to maxSlots): not stuck yet
-    if (this.slots < this.maxSlots && this.fronts().some((f) => this.canTap(f.id) === 'full')) return false;
+    // a full road counts as jammed even while + could still open a slot: the player gets
+    // one lap to tap it (the + flashes), then the revive card comes up
     const want = new Uint8Array(COLOR_KEYS.length);
     for (const b of road) want[b.color] = 1;
     for (let i = 0; i < this.n; i++) {

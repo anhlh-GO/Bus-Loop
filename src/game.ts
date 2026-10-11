@@ -39,6 +39,7 @@ import iconUrl from './assets/icon.png';
 import bBroomUrl from './assets/b_broom.png';
 import bShuffleUrl from './assets/b_shuffle.png';
 import bMagnetUrl from './assets/b_magnet.png';
+import bReplayUrl from './assets/b_replay.png';
 import {
   boosterIcon, roundBooster, dialog, iconTile, infoBox, inside, levelPill, pillButton, popupCard, ribbon, roundButton, slotPill,
   speedButton, toast, type BoosterKey, type Rect,
@@ -1525,9 +1526,34 @@ function drawEmojis(): void {
   }
 }
 
+const replayImg = new Image();
+replayImg.src = bReplayUrl;
+
+/** The replay button sits right of the gear, clear of the level pill. */
+function replayX(): number {
+  const pw = Math.min(L.cw * 0.385, L.u * 0.385);
+  return Math.min(L.homeX + L.homeR * 2.45, L.cx0 + L.cw / 2 - pw / 2 - L.homeR * 1.2);
+}
+
+/** Replay from the top bar: the round is given up (analytics closes it as a loss) and starts over. */
+function replayLevel(): void {
+  if (state !== 'playing' && state !== 'lost') return;
+  state = 'over';
+  overlay = null;
+  armed = null;
+  streak = 0;
+  FalconSDK.userData.set({ streak });
+  events.emit('lose', { canRevive: false });
+  startLevel(level);
+}
+
 function drawHud(): void {
   const { u } = L;
   roundButton(ctx, L.homeX, L.homeY, L.homeR, 'gear');
+  // the replay button: the studio's own art (src/assets/b_replay.png), a little larger than the gear's face
+  const rr = L.homeR * 1.08;
+  if (replayImg.complete && replayImg.naturalWidth) ctx.drawImage(replayImg, replayX() - rr, L.homeY - rr, rr * 2, rr * 2);
+  else roundButton(ctx, replayX(), L.homeY, L.homeR, 'replay');
   const pw = Math.min(L.cw * 0.385, u * 0.385);
   levelPill(ctx, L.cx0 + L.cw / 2 - pw / 2, L.hudY, pw, L.hudH, `Level ${level + 1}`, sim.progress(total) / 100);
   // the orange count of marbles collected, right of the bar (it swells as it ticks up)
@@ -3066,6 +3092,7 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   if (gathering()) return;
   if (Math.hypot(p.x - L.homeX, p.y - L.homeY) < L.homeR * 1.3) { sfx.click(); pressAt({ x: L.homeX - L.homeR, y: L.homeY - L.homeR, w: L.homeR * 2, h: L.homeR * 2 }); overlay = { kind: 'settings', t: 0, from: 'game', confirm: 0 }; armed = null; return; }
+  if (Math.hypot(p.x - replayX(), p.y - L.homeY) < L.homeR * 1.2) { sfx.click(); pressAt({ x: replayX() - L.homeR, y: L.homeY - L.homeR, w: L.homeR * 2, h: L.homeR * 2 }); setTimeout(replayLevel, 130); return; }
   if (Math.hypot(p.x - L.speedX, p.y - L.speedY) < L.speedR * 1.4) { speedIdx = (speedIdx + 1) % SPEEDS.length; sfx.click(); return; }
   if (coach.length && coachT > 0.5 && (inside(slotPlus, p.x, p.y) || boosterSpots.some((s) => Math.hypot(p.x - s.x, p.y - s.y) < s.r * 1.3))) { coach.shift(); coachT = 0; }
   if (inside(slotPlus, p.x, p.y)) { void useBooster('slot'); return; }

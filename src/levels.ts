@@ -415,6 +415,19 @@ export function generate(i: number, seed: number, p: Params = paramsOf(i)): Leve
     lb.hidden = false;
     locks--;
   }
+  // The lot must be able to empty on its own rules (frozen buses thaw as others leave, a rope
+  // needs both ends at the front, a padlock needs a key from an earlier bus): untie ropes, then
+  // thaw ice, then drop padlocks until it does — a front row of ice beside a roped pair whose
+  // other end waits behind the ice locks the whole lot for good otherwise
+  while (!lotClears(buses, C)) {
+    const roped = buses.filter((b) => b.link >= 0);
+    const iced = buses.filter((b) => (b.frozen ?? 0) > 0).sort((a, z) => (z.frozen ?? 0) - (a.frozen ?? 0));
+    const padlocked = buses.filter((b) => b.locked);
+    if (roped.length) { const b = roped[roped.length - 1]; buses[b.link].link = -1; b.link = -1; }
+    else if (iced.length) iced[0].frozen = 0;
+    else if (padlocked.length) padlocked[0].locked = false;
+    else break;
+  }
   // Level 1 cannot be lost: every bus fits on the road at once (so a bus can always be sent), and
   // with every colour's buses out together, someone by the road always has a bus to board
   if (i === 0) base.slots = Math.max(base.slots, buses.length);
@@ -469,6 +482,32 @@ export function botRun(spec: LevelSpec, rnd: () => number, eps = 0.12): boolean 
     sim.step();
   }
   return false;
+}
+
+/** Can the lot empty by its own rules alone (ignoring the road and the crowd)? */
+export function lotClears(buses: BusSpec[], C: number): boolean {
+  const cols: number[][] = Array.from({ length: C }, () => []);
+  for (const b of [...buses].sort((a, z) => a.depth - z.depth)) cols[b.col].push(b.id);
+  const frozen = buses.map((b) => b.frozen ?? 0);
+  const locked = buses.map((b) => !!b.locked);
+  let keys = 0, left = buses.length;
+  const front = (id: number): boolean => cols.some((c) => c[0] === id);
+  const leave = (id: number): void => {
+    for (const c of cols) { const k = c.indexOf(id); if (k >= 0) c.splice(k, 1); }
+    if (buses[id].keyBus) keys++;
+    for (let o = 0; o < frozen.length; o++) if (o !== id && frozen[o] > 0) frozen[o]--;
+    left--;
+  };
+  for (;;) {
+    for (const c of cols) if (c.length && locked[c[0]] && keys > 0) { locked[c[0]] = false; keys--; }
+    if (!left) return true;
+    const id = cols.map((c) => c[0]).find((b) => b !== undefined && !locked[b] && frozen[b] <= 0 &&
+      (buses[b].link < 0 || (front(buses[b].link) && !locked[buses[b].link] && frozen[buses[b].link] <= 0)));
+    if (id === undefined) return false;
+    const mate = buses[id].link;
+    leave(id);
+    if (mate >= 0) leave(mate);
+  }
 }
 
 const cache = new Map<number, LevelSpec>();

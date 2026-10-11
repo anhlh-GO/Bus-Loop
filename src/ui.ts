@@ -231,7 +231,7 @@ export function speedButton(ctx: CanvasRenderingContext2D, x: number, y: number,
 }
 
 /** Round white button with a blue rim (home, close of album). */
-export function roundButton(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, glyph: 'home' | 'gear'): void {
+export function roundButton(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, glyph: 'home' | 'gear' | 'replay'): void {
   puck(ctx, x, y, r, 0.16, '#8fb2db');
   const ring = ctx.createLinearGradient(0, y - r, 0, y + r);
   ring.addColorStop(0, '#ffffff');
@@ -254,6 +254,20 @@ export function roundButton(ctx: CanvasRenderingContext2D, x: number, y: number,
     ctx.lineTo(x - r * 0.1, y + r * 0.14); ctx.lineTo(x - r * 0.1, y + r * 0.42); ctx.lineTo(x - r * 0.34, y + r * 0.42);
     ctx.lineTo(x - r * 0.34, y - r * 0.04); ctx.lineTo(x - r * 0.48, y - r * 0.04); ctx.closePath();
     ctx.fill();
+  } else if (glyph === 'replay') {
+    // a circular arrow, open at the top, its head running clockwise into the gap
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = r * 0.15;
+    ctx.lineCap = 'round';
+    const a0 = -Math.PI * 0.42, a1 = a0 + Math.PI * 1.62, rr = r * 0.34;
+    ctx.beginPath(); ctx.arc(x, y, rr, a0, a1); ctx.stroke();
+    const px = x + Math.cos(a1) * rr, py = y + Math.sin(a1) * rr;
+    const tx = -Math.sin(a1), ty = Math.cos(a1), nx = Math.cos(a1), ny = Math.sin(a1);
+    ctx.beginPath();
+    ctx.moveTo(px + tx * r * 0.26, py + ty * r * 0.26);
+    ctx.lineTo(px + nx * r * 0.2 - tx * r * 0.04, py + ny * r * 0.2 - ty * r * 0.04);
+    ctx.lineTo(px - nx * r * 0.2 - tx * r * 0.04, py - ny * r * 0.2 - ty * r * 0.04);
+    ctx.closePath(); ctx.fill();
   } else {
     for (let k = 0; k < 8; k++) {
       ctx.save(); ctx.translate(x, y); ctx.rotate((k * Math.PI) / 4);
