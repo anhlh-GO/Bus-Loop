@@ -26,6 +26,7 @@ import homeUrl from './assets/home.jpg';
 import albumUrl from './assets/collection.jpg';
 import loadingUrl from './assets/loading.jpg';
 import settingsUrl from './assets/settings.jpg';
+import winUrl from './assets/win.jpg';
 import iconUrl from './assets/icon.png';
 
 // the home-screen icon for iPhone "Add to Home Screen" (inlined, so the build stays one file)
@@ -91,10 +92,11 @@ let tickAcc = 0;
 /** DEV timing (ms, summed): the sim, the crowd, the buses, frames. */
 const perf: { sim: number; crowd: number; buses: number; frames: number; layouts?: number; starts?: number } = { sim: 0, crowd: 0, buses: 0, frames: 0 };
 /** Game speed: the button toggles ×1 / ×2 ("Speed" / "Speeding"); the last six buses always run at ×2. */
-const SPEEDS = [1, 2];
+/** Speed button and the final rush both run the game 1.6× (2× felt too fast). */
+const SPEEDS = [1, 1.6];
 let speedIdx = 0;
 const boosted = (): boolean => sim.rushOn() && state === 'playing';
-const speedMul = (): number => Math.max(SPEEDS[speedIdx], boosted() ? 2 : 1);
+const speedMul = (): number => Math.max(SPEEDS[speedIdx], boosted() ? 1.6 : 1);
 let combo = 0;
 let comboT = 0;
 /** Marbles collected this round (the orange counter), and when it last ticked up. */
@@ -127,7 +129,7 @@ type Overlay =
   | { kind: 'intro'; t: number; what: IntroKey }
   | { kind: 'home'; t: number }
   | { kind: 'settings'; t: number; from: 'home' | 'game'; confirm: number }
-  | { kind: 'loading'; t: number }
+  | { kind: 'loading'; t: number; next: 'home' | 'game' }
   | { kind: 'album'; t: number; scroll: number; from: 'home' | 'game' }
   | { kind: 'win'; t: number }
   | { kind: 'hard'; t: number; tier: 'hard' | 'super' };
@@ -153,6 +155,8 @@ interface CoachStep { text: string; at: () => Pt | null; dur: number }
 let coach: CoachStep[] = [];
 /** How long the road has been full with a bus waiting (for the + hint). */
 let fullT = 0;
+/** Time to the next automatic departure in the final rush. */
+let autoT = 0;
 /** The home screen's picture. */
 const homeImg = new Image();
 homeImg.src = homeUrl;
@@ -165,6 +169,7 @@ const BOOSTER_ART: Record<string, { img: HTMLImageElement; w0: number; cx: numbe
 };
 const loadingImg = boosterImg(loadingUrl);
 const settingsImg = boosterImg(settingsUrl);
+const winImg = boosterImg(winUrl);
 const albumImg = new Image();
 albumImg.src = albumUrl;
 /** Coins won (40 a level) and the current win streak, kept in the save. */
@@ -1103,7 +1108,11 @@ const tickLen = (): number => TICK / speedMul();
 function update(dt: number): void {
   if (state === 'playing') FalconSDK.analytics.turn.tick(dt);
   if (overlay) overlay.t += dt;
-  if (overlay?.kind === 'loading' && overlay.t >= LOADING) overlay = { kind: 'home', t: 0 };
+  updateFireworks(dt, overlay?.kind === 'win', overlay?.kind === 'win' ? overlay.t : 9);
+  if (overlay?.kind === 'loading' && overlay.t >= LOADING) {
+    if (overlay.next === 'home') overlay = { kind: 'home', t: 0 };
+    else { overlay = afterHome; afterHome = null; }
+  }
   if (overlay?.kind === 'settings' && overlay.confirm > 0) overlay.confirm = Math.max(0, overlay.confirm - dt);
   if (overlay?.kind === 'hard' && overlay.t > 2.2) closeHard();
   for (const k of keyFlights) {
@@ -1258,6 +1267,15 @@ function update(dt: number): void {
   floaters = floaters.filter((f) => f.t < f.life);
   toastT = Math.max(0, toastT - dt);
   if (gathering() && !overlay) gatherT = Math.min(GATHER, gatherT + dt);
+  // the last six buses (road and lot together) leave the lot on their own, one after another
+  autoT -= dt;
+  if (autoT <= 0 && canPlay() && !armed && state === 'playing' && tutorial < 0 && !gathering()) {
+    const left = sim.buses.filter((b) => b.where === 'lot' || b.where === 'enter' || b.where === 'road').length;
+    if (left <= 6) {
+      const f = sim.fronts().find((x) => { const st = sim.canTap(x.id); return st === 'ok' || st === 'free'; });
+      if (f) { tapBus(f.id); autoT = 0.35 / speedMul(); }
+    }
+  }
   // stuck on a full road while + can still open a slot: show the player the + (once)
   const roadFull = canPlay() && level + 1 >= SLOT_UNLOCK && sim.slots < MAX_SLOTS && sim.freeSlots() <= 0 && sim.fronts().some((f) => sim.canTap(f.id) === 'full');
   fullT = roadFull ? fullT + dt : 0;
@@ -2214,6 +2232,95 @@ function popIn(t: number): number {
   return k < 1 ? Math.max(0, 1 + 2.2 * Math.pow(k - 1, 3) + 1.2 * Math.pow(k - 1, 2)) : 1;
 }
 
+/** The Level Complete popup cut out of its black backdrop (src/assets/win.jpg, 1086 × 1449). */
+let winCut: HTMLCanvasElement | null = null;
+function buildWinCut(): void {
+  if (winCut || !winImg.complete || !winImg.naturalWidth) return;
+  const c = document.createElement('canvas');
+  c.width = winImg.naturalWidth; c.height = winImg.naturalHeight;
+  const g = c.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(winImg, 0, 0);
+  // the black around the popup becomes see-through (a soft ramp, so the edges stay smooth)
+  const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const m = Math.max(px[i], px[i + 1], px[i + 2]);
+    if (m < 34) px[i + 3] = Math.max(0, Math.round(((m - 10) / 24) * 255));
+  }
+  g.putImageData(d, 0, 0);
+  winCut = c;
+}
+
+/** Fireworks over the clear screen: bursts of sparks for the first two seconds. */
+let fireworks: { x: number; y: number; vx: number; vy: number; t: number; life: number; c: string }[] = [];
+let fireT = 0;
+function updateFireworks(dt: number, active: boolean, age: number): void {
+  for (const f of fireworks) { f.t += dt; f.vy += L.u * 0.9 * dt; f.vx *= 0.985; f.vy *= 0.985; f.x += f.vx * dt; f.y += f.vy * dt; }
+  fireworks = fireworks.filter((f) => f.t < f.life);
+  if (!active || age > 2) return;
+  fireT -= dt;
+  if (fireT > 0) return;
+  fireT = 0.16 + Math.random() * 0.12;
+  const cols = ['#ffd84a', '#ff6b9a', '#7ef07a', '#6fd3ff', '#c48bff', '#ffffff', '#ff9f3a'];
+  const c = cols[Math.floor(Math.random() * cols.length)];
+  const x = L.cx0 + L.cw * (0.12 + Math.random() * 0.76), y = L.h * (0.08 + Math.random() * 0.3);
+  const n = 26, sp = L.u * (0.35 + Math.random() * 0.2);
+  for (let k = 0; k < n; k++) {
+    const a = (k / n) * Math.PI * 2 + Math.random() * 0.2, v = sp * (0.7 + Math.random() * 0.4);
+    fireworks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, life: 0.8 + Math.random() * 0.4, c: Math.random() < 0.25 ? '#ffffff' : c });
+  }
+  sfx.reveal();
+}
+function drawFireworks(): void {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const f of fireworks) {
+    const a = 1 - f.t / f.life, r = L.u * 0.009 * (0.6 + a);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = f.c;
+    ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = a * 0.35;
+    ctx.beginPath(); ctx.arc(f.x - f.vx * 0.03, f.y - f.vy * 0.03, r * 0.8, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/**
+ * The clear screen, in the reference's Halloween popup: "Level Complete!" banner with the ghost
+ * and pumpkin, a card holding this level's finished picture and its name, and Next Level.
+ * Fireworks for the first two seconds.
+ */
+function drawWin(t: number): void {
+  buildWinCut();
+  const W0 = 1086, H0 = 1449;
+  const s = Math.min((L.cw * 0.98) / W0, (L.h * 0.8) / H0);
+  const ox = L.w / 2 - (W0 * s) / 2, oy = L.h * 0.46 - (H0 * s) / 2;
+  const P = (x: number, y: number): Pt => ({ x: ox + x * s, y: oy + y * s });
+  if (winCut) ctx.drawImage(winCut, ox, oy, W0 * s, H0 * s);
+  // this level's picture in the card's window, filling in from the bottom
+  const a = P(266, 506), b = P(826, 1044), w = b.x - a.x, h = b.y - a.y;
+  ctx.save();
+  roundRect(ctx, a.x, a.y, w, h, 14 * s); ctx.clip();
+  ctx.fillStyle = '#fff6e6'; ctx.fillRect(a.x, a.y, w, h);
+  const k = Math.min(1, t / 0.9);
+  ctx.beginPath(); ctx.rect(a.x, a.y + h * (1 - k), w, h * k + 1); ctx.clip();
+  const img = winPicture(level, Math.max(w, h));
+  ctx.drawImage(img, a.x + (w - Math.max(w, h)) / 2, a.y + (h - Math.max(w, h)) / 2, Math.max(w, h), Math.max(w, h));
+  ctx.restore();
+  // the name plate
+  const n0 = P(320, 1078), n1 = P(785, 1134);
+  ctx.fillStyle = '#fdecd2';
+  roundRect(ctx, n0.x, n0.y, n1.x - n0.x, n1.y - n0.y, (n1.y - n0.y) / 2); ctx.fill();
+  const nc = P(552, 1106);
+  ctx.font = `900 ${54 * s}px ${FONT}`;
+  const name = PICTURES[level % PICTURES.length].name;
+  const fit = Math.min(54 * s, (54 * s * (n1.x - n0.x) * 0.92) / Math.max(1, ctx.measureText(name).width));
+  outlinedText(ctx, name, nc.x, nc.y, fit, '#ffffff', '#7a3a10');
+  drawFireworks();
+  // Next Level
+  const b0 = P(150, 1180), b1 = P(935, 1385);
+  buttons.push({ id: 'next', r: { x: b0.x, y: b0.y, w: b1.x - b0.x, h: b1.y - b0.y } });
+}
+
 function drawOverlay(o: Overlay): void {
   const { u } = L;
   buttons = [];
@@ -2316,79 +2423,7 @@ function drawOverlay(o: Overlay): void {
     pillButton(ctx, b, 'Retry');
     buttons.push({ id: 'retry', r: b });
   } else if (o.kind === 'win') {
-    // the reference's clear screen: a burst of light, the gold "Level Complete!" ribbon,
-    // the finished picture on a white card, coins tumbling past it
-    const pic = PICTURES[level % PICTURES.length];
-    const cw = Math.min(L.cw * 0.66, u * 0.62);
-    const cx = L.w / 2, cy = L.h * 0.44;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(o.t * 0.25);
-    for (let k = 0; k < 14; k++) {
-      ctx.rotate((Math.PI * 2) / 14);
-      ctx.fillStyle = 'rgba(255, 226, 120, 0.16)';
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-u * 0.09, -u * 0.9); ctx.lineTo(u * 0.09, -u * 0.9); ctx.closePath(); ctx.fill();
-    }
-    ctx.restore();
-    const glow = ctx.createRadialGradient(cx, cy, cw * 0.2, cx, cy, cw * 0.95);
-    glow.addColorStop(0, 'rgba(255, 236, 150, 0.45)');
-    glow.addColorStop(1, 'rgba(255, 236, 150, 0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(cx - cw, cy - cw, cw * 2, cw * 2);
-    // the card
-    const x0 = cx - cw / 2, y0 = cy - cw / 2;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-    roundRect(ctx, x0 + 4, y0 + 8, cw, cw, u * 0.03); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    roundRect(ctx, x0 - 6, y0 - 6, cw + 12, cw + 12, u * 0.035); ctx.fill();
-    ctx.fillStyle = '#e9eef8';
-    roundRect(ctx, x0, y0, cw, cw, u * 0.025); ctx.fill();
-    const k = Math.min(1, o.t / 1.0);
-    ctx.save();
-    ctx.beginPath(); ctx.rect(x0, y0 + cw * (1 - k), cw, cw * k + 1); ctx.clip();
-    ctx.drawImage(winPicture(level, cw - u * 0.03), x0 + u * 0.015, y0 + u * 0.015, cw - u * 0.03, cw - u * 0.03);
-    ctx.restore();
-    ribbon(ctx, cx, y0 - u * 0.12, Math.min(L.cw * 0.86, u * 0.8), u * 0.15, 'Level Complete!', 'gold');
-    outlinedText(ctx, pic.name, cx, y0 + cw + u * 0.07, u * 0.05, '#fff36b', INK);
-    // coins tumbling down past the card
-    for (let i = 0; i < 9; i++) {
-      const t = o.t - i * 0.12;
-      if (t < 0) continue;
-      const fx = cx + Math.sin(i * 2.3) * cw * 0.12, fy = y0 - u * 0.1 + t * u * 0.9 + Math.sin(t * 5 + i) * u * 0.01;
-      if (fy > y0 + cw + u * 0.1) continue; // they stop short of the Next Level button
-      const r = u * 0.042, sq = Math.abs(Math.cos(t * 4 + i));
-      ctx.save();
-      ctx.translate(fx, fy);
-      ctx.scale(0.35 + 0.65 * sq, 1);
-      ctx.fillStyle = '#b86a00';
-      ctx.beginPath(); ctx.arc(0, r * 0.12, r, 0, Math.PI * 2); ctx.fill();
-      const cg = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.1, 0, 0, r);
-      cg.addColorStop(0, '#fff3a0');
-      cg.addColorStop(1, '#f2a510');
-      ctx.fillStyle = cg;
-      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = '#d58a00';
-      ctx.lineWidth = r * 0.12;
-      ctx.beginPath(); ctx.arc(0, 0, r * 0.72, 0, Math.PI * 2); ctx.stroke();
-      // a little bus on the coin: body, two windows, wheels
-      ctx.fillStyle = '#c47800';
-      roundRect(ctx, -r * 0.38, -r * 0.34, r * 0.76, r * 0.56, r * 0.14); ctx.fill();
-      ctx.fillStyle = '#ffe48a';
-      roundRect(ctx, -r * 0.28, -r * 0.25, r * 0.24, r * 0.2, r * 0.05); ctx.fill();
-      roundRect(ctx, r * 0.04, -r * 0.25, r * 0.24, r * 0.2, r * 0.05); ctx.fill();
-      ctx.fillStyle = '#c47800';
-      ctx.beginPath(); ctx.arc(-r * 0.2, r * 0.28, r * 0.1, 0, Math.PI * 2); ctx.arc(r * 0.2, r * 0.28, r * 0.1, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-    }
-    // Next Level: straight into the next level (shows once the picture has filled in)
-    if (o.t > 0.8) {
-      const bw = Math.min(L.cw * 0.62, u * 0.6), bh = u * 0.13;
-      const b: Rect = { x: cx - bw / 2, y: y0 + cw + u * 0.15, w: bw, h: bh };
-      ctx.globalAlpha = Math.min(1, (o.t - 0.8) * 4);
-      pillButton(ctx, b, level + 1 >= LEVEL_COUNT ? 'Play Again' : 'Next Level', 'green');
-      ctx.globalAlpha = 1;
-      buttons.push({ id: 'next', r: b });
-    }
+    drawWin(o.t);
   }
   ctx.restore();
 }
@@ -2618,26 +2653,104 @@ function drawSettings(o: Extract<Overlay, { kind: 'settings' }>): void {
   box('setClose', 950, 210, 1078, 336);
 }
 
-/** The loading screen between a level and home: the illustrated title (src/assets/loading.jpg) and a filling bar. */
+/**
+ * The loading screen (src/assets/loading.jpg, 942 × 1669): the bus waves in, its eyes looking
+ * left and right, and the little bus rides the bar as it fills. Shown from home into a level and
+ * from a level back home. The picture's own bar is repainted empty once (the static bus on it
+ * covered with a copy of the bar and road next to it) and the live bar and bus drawn over it.
+ */
 const LOADING = 1.5;
+const LD = { eyes: [[425, 956], [604, 1012]] as [number, number][], ir: 47, whites: [[426, 940, 64, 72], [624, 1004, 62, 72]] as [number, number, number, number][],
+  bar: [180, 1454, 758, 1509], bus: [570, 1404, 698, 1500] };
+let loadingCut: { base: HTMLCanvasElement; irises: HTMLCanvasElement[]; bus: HTMLCanvasElement } | null = null;
+function buildLoadingCut(): void {
+  if (loadingCut || !loadingImg.complete || !loadingImg.naturalWidth) return;
+  const k = loadingImg.naturalWidth / 942;
+  const base = document.createElement('canvas');
+  base.width = loadingImg.naturalWidth; base.height = loadingImg.naturalHeight;
+  const g = base.getContext('2d')!;
+  g.drawImage(loadingImg, 0, 0);
+  const [bx0, by0, bx1, by1] = LD.bus;
+  // the little bus, cut with a soft rounded edge
+  const bus = document.createElement('canvas');
+  bus.width = Math.round((bx1 - bx0) * k); bus.height = Math.round((by1 - by0) * k);
+  const bg = bus.getContext('2d')!;
+  bg.drawImage(loadingImg, bx0 * k, by0 * k, bus.width, bus.height, 0, 0, bus.width, bus.height);
+  bg.globalCompositeOperation = 'destination-in';
+  bg.filter = `blur(${3 * k}px)`;
+  bg.fillStyle = '#000';
+  roundRect(bg, 8 * k, 12 * k, bus.width - 30 * k, bus.height - 20 * k, 18 * k); bg.fill();
+  // cover the static bus: the bar from further left, the road from further left above it
+  const w = bx1 - bx0;
+  g.drawImage(loadingImg, 300 * k, 1438 * k, w * k, 92 * k, bx0 * k, 1438 * k, w * k, 92 * k);
+  g.drawImage(loadingImg, 430 * k, by0 * k, w * k, (1438 - by0) * k, bx0 * k, by0 * k, w * k, (1438 - by0) * k);
+  // the eyes: irises cut out, the whites painted where they were
+  const irises = LD.eyes.map(([ex, ey], i) => {
+    const r = LD.ir * k, ic = document.createElement('canvas');
+    ic.width = ic.height = Math.ceil(r * 2);
+    const ig = ic.getContext('2d')!;
+    ig.drawImage(loadingImg, (ex - LD.ir) * k, (ey - LD.ir) * k, r * 2, r * 2, 0, 0, r * 2, r * 2);
+    ig.globalCompositeOperation = 'destination-in';
+    const m = ig.createRadialGradient(r, r, r * 0.8, r, r, r * 0.96);
+    m.addColorStop(0, 'rgba(0,0,0,1)'); m.addColorStop(1, 'rgba(0,0,0,0)');
+    ig.fillStyle = m; ig.fillRect(0, 0, r * 2, r * 2);
+    const [wx, wy, rx, ry] = LD.whites[i];
+    g.save();
+    g.beginPath(); g.ellipse(wx * k, wy * k, rx * k, ry * k, 0, 0, Math.PI * 2); g.clip();
+    const off = document.createElement('canvas');
+    off.width = off.height = Math.ceil(r * 2.5);
+    const og = off.getContext('2d')!;
+    const wg = og.createLinearGradient(0, 0, 0, off.height);
+    wg.addColorStop(0, '#ffffff'); wg.addColorStop(0.6, '#f4f6fb'); wg.addColorStop(1, '#dfe4ef');
+    og.fillStyle = wg; og.fillRect(0, 0, off.width, off.height);
+    og.globalCompositeOperation = 'destination-in';
+    const fm = og.createRadialGradient(off.width / 2, off.height / 2, r * 0.98, off.width / 2, off.height / 2, r * 1.2);
+    fm.addColorStop(0, 'rgba(0,0,0,1)'); fm.addColorStop(1, 'rgba(0,0,0,0)');
+    og.fillStyle = fm; og.fillRect(0, 0, off.width, off.height);
+    g.drawImage(off, ex * k - off.width / 2, ey * k - off.height / 2);
+    g.restore();
+    return ic;
+  });
+  loadingCut = { base, irises, bus };
+}
+
 function drawLoading(t: number): void {
-  const W0 = 942, H0 = 1670;
-  ctx.fillStyle = '#1a1036';
+  const W0 = 942, H0 = 1669;
+  ctx.fillStyle = '#3d8fe0';
   ctx.fillRect(0, 0, L.w, L.h);
+  buildLoadingCut();
   const s = Math.max(L.cw / W0, L.h / H0);
   const ox = L.cx0 + (L.cw - W0 * s) / 2, oy = (L.h - H0 * s) / 2;
   const P = (x: number, y: number): Pt => ({ x: ox + x * s, y: oy + y * s });
   ctx.save();
   ctx.beginPath(); ctx.rect(L.cx0, 0, L.cw, L.h); ctx.clip();
-  if (loadingImg.complete && loadingImg.naturalWidth) ctx.drawImage(loadingImg, ox, oy, W0 * s, H0 * s);
-  const a = P(250, 1500), b = P(692, 1534), h = b.y - a.y;
-  ctx.fillStyle = 'rgba(30, 12, 50, 0.75)';
-  roundRect(ctx, a.x - 4, a.y - 4, b.x - a.x + 8, h + 8, (h + 8) / 2); ctx.fill();
-  const k = Math.min(1, t / (LOADING * 0.92)), e = 1 - Math.pow(1 - k, 2);
-  const g = ctx.createLinearGradient(0, a.y, 0, b.y);
-  g.addColorStop(0, '#ffd166'); g.addColorStop(1, '#ff8a1e');
-  ctx.fillStyle = g;
-  roundRect(ctx, a.x, a.y, Math.max(h, (b.x - a.x) * e), h, h / 2); ctx.fill();
+  if (loadingCut) {
+    ctx.drawImage(loadingCut.base, ox, oy, W0 * s, H0 * s);
+    // the eyes look left, ahead, right
+    const ph = (clock % 3) / 3;
+    const look = ph < 0.15 ? 0 : ph < 0.25 ? -(ph - 0.15) / 0.1 : ph < 0.45 ? -1 : ph < 0.55 ? -1 + (ph - 0.45) / 0.1 : ph < 0.65 ? (ph - 0.55) / 0.1 : ph < 0.85 ? 1 : 1 - (ph - 0.85) / 0.1;
+    LD.eyes.forEach(([ex, ey], i) => {
+      const c = P(ex + look * 13, ey + Math.abs(look) * 2), r = LD.ir * s;
+      ctx.drawImage(loadingCut!.irises[i], c.x - r, c.y - r, r * 2, r * 2);
+    });
+    // the bar: empty channel, the orange fill, the little bus riding its end
+    const [x0, y0, x1, y1] = LD.bar, a = P(x0, y0), b = P(x1, y1), h = b.y - a.y;
+    const tg = ctx.createLinearGradient(0, a.y, 0, b.y);
+    tg.addColorStop(0, '#f2f6fd'); tg.addColorStop(1, '#c9d5ee');
+    ctx.fillStyle = tg;
+    roundRect(ctx, a.x, a.y, b.x - a.x, h, h / 2); ctx.fill();
+    const k = Math.min(1, t / (LOADING * 0.9)), e = 1 - Math.pow(1 - k, 2);
+    const fw = Math.max(h, (b.x - a.x) * e);
+    const fg = ctx.createLinearGradient(0, a.y, 0, b.y);
+    fg.addColorStop(0, '#ffd23a'); fg.addColorStop(1, '#f7a20a');
+    ctx.fillStyle = fg;
+    roundRect(ctx, a.x, a.y, fw, h, h / 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    roundRect(ctx, a.x + h * 0.3, a.y + h * 0.12, Math.max(0, fw - h * 0.6), h * 0.22, h * 0.11); ctx.fill();
+    const [bx0, by0, bx1, by1] = LD.bus, bw = (bx1 - bx0) * s, bh = (by1 - by0) * s;
+    const bob = Math.abs(Math.sin(clock * 12)) * 3 * s;
+    ctx.drawImage(loadingCut.bus, Math.min(b.x - bw * 0.9, a.x + fw - bw * 0.15), P(0, by0).y - bob, bw, bh);
+  }
   ctx.restore();
 }
 
@@ -2871,8 +2984,8 @@ async function onButton(id: string): Promise<void> {
     overlay = null;
     startLevel(level + 1 >= LEVEL_COUNT ? level : level + 1);
   } else if (id === 'play' && o.kind === 'home') {
-    overlay = afterHome;
-    afterHome = null;
+    // into the level through the loading screen (the level's own card, if any, comes after it)
+    overlay = { kind: 'loading', t: 0, next: 'game' };
   } else if (id === 'homeGear' && o.kind === 'home') {
     overlay = { kind: 'settings', t: 0, from: 'home', confirm: 0 };
   } else if (id.startsWith('set:') && o.kind === 'settings') {
@@ -2881,7 +2994,7 @@ async function onButton(id: string): Promise<void> {
   } else if (id === 'setClose' && o.kind === 'settings') {
     overlay = o.from === 'home' ? { kind: 'home', t: 1 } : null;
   } else if (id === 'setHome' && o.kind === 'settings') {
-    overlay = o.from === 'home' ? { kind: 'home', t: 1 } : { kind: 'loading', t: 0 };
+    overlay = o.from === 'home' ? { kind: 'home', t: 1 } : { kind: 'loading', t: 0, next: 'home' };
   } else if (id === 'setClear' && o.kind === 'settings') {
     if (o.confirm > 0) clearProgress();
     else o.confirm = 3;
@@ -2895,7 +3008,7 @@ async function onButton(id: string): Promise<void> {
   } else if (id === 'shop') {
     FalconSDK.shop.open();
   } else if (id === 'albumHome' && o.kind === 'album') {
-    overlay = { kind: 'loading', t: 0 };
+    overlay = o.from === 'home' ? { kind: 'home', t: 1 } : { kind: 'loading', t: 0, next: 'home' };
   } else if (id === 'albumClose' && o.kind === 'album') {
     overlay = o.from === 'home' ? { kind: 'home', t: 1 } : null;
   }

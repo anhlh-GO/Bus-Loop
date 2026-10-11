@@ -486,7 +486,11 @@ export class Sim {
     // inside a ring's pocket the crowd mostly falls straight down (and fills it from the top,
     // through the tunnel over the ring), drifting a little towards the ring's lanes
     const inPocket = (x: number, y: number): boolean => g.pockets.some((pk) => y > pk.ty && y < pk.by && Math.abs(x - pk.cx) < pk.hw);
-    const stem = (x: number, y: number): number => inPocket(x, y)
+    // under a stretch of road that runs across (the T's bar): the crowd falls straight down into
+    // the room below it instead of clinging to the road above
+    const roofs = g.bodies.filter((b) => b.pts.length === 2 && Math.abs(b.pts[0][1] - b.pts[1][1]) < 0.01);
+    const underRoof = (x: number, y: number): boolean => y < g.H && roofs.some((b) => y > b.pts[0][1] + b.hw && x > Math.min(b.pts[0][0], b.pts[1][0]) - b.hw - 4 && x < Math.max(b.pts[0][0], b.pts[1][0]) + b.hw + 4);
+    const stem = (x: number, y: number): number => inPocket(x, y) || underRoof(x, y)
       ? 0.25 * roadDist(g, x, y) - 0.8 * y
       : roadDist(g, x, y) - 0.3 * y + (y < yTop ? 0.6 * Math.abs(x - g.W / 2) : 0);
     // the board's octagon: the four corners are cut at 45° (top ones from the top of the
