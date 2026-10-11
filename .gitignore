@@ -1,0 +1,12 @@
+node_modules
+dist
+*.local
+*.log
+.DS_Store
+
+# Falcon IDE: publish runs and build cache (generated, per machine)
+.falcon-publish
+
+# local backups and the generated Android project (CI creates it)
+.backup-reflow
+android

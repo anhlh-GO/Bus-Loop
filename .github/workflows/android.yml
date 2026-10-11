@@ -1,0 +1,33 @@
+# Builds a debug APK of the game on every push to main (or by hand: Actions > Build APK > Run workflow).
+# The APK is attached to the run under "Artifacts".
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run build
+      # the Android project is generated here each time (not kept in the repo)
+      - run: npx cap add android
+      - name: Portrait only
+        run: sed -i 's/<activity$/<activity android:screenOrientation="portrait"/' android/app/src/main/AndroidManifest.xml
+      - run: npx cap sync android
+      - run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bus-loop-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
