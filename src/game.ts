@@ -27,6 +27,8 @@ import albumUrl from './assets/collection.jpg';
 import loadingUrl from './assets/loading.jpg';
 import settingsUrl from './assets/settings.jpg';
 import winUrl from './assets/win.jpg';
+import failedUrl from './assets/failed.jpg';
+import jamUrl from './assets/jam.jpg';
 import iconUrl from './assets/icon.png';
 
 // the home-screen icon for iPhone "Add to Home Screen" (inlined, so the build stays one file)
@@ -171,6 +173,8 @@ const BOOSTER_ART: Record<string, { img: HTMLImageElement; w0: number; cx: numbe
 const loadingImg = boosterImg(loadingUrl);
 const settingsImg = boosterImg(settingsUrl);
 const winImg = boosterImg(winUrl);
+const failedImg = boosterImg(failedUrl);
+const jamImg = boosterImg(jamUrl);
 const albumImg = new Image();
 albumImg.src = albumUrl;
 /** Coins won (40 a level) and the current win streak, kept in the save. */
@@ -701,6 +705,9 @@ function lerpAngle(a: number, b: number, k: number): number {
 // ---------------------------------------------------------------- level
 
 function startLevel(index: number): void {
+  reviveHold = 0;
+  melts.clear();
+  frozenSeen.clear();
   perf.starts = (perf.starts ?? 0) + 1;
   level = Math.max(0, Math.min(LEVEL_COUNT - 1, Math.floor(index)));
   spec = getLevel(level);
@@ -860,8 +867,9 @@ function apply(ev: SimEvent[]): void {
       // behind the rest of the group, so a big group never chases a bus already far away
       const roof = roofPos(e.bus);
       const dist = Math.hypot(roof.x - p.x, roof.y - p.y);
-      const wait = Math.random() * 0.12 / speedMul();
-      const dur = Math.min(0.55, 0.25 + dist / (L.cs * 60)) * (0.9 + Math.random() * 0.2) / speedMul();
+      // a revive boards everyone in one slower wave, spread over REVIVE_BOARD seconds
+      const wait = reviveSlow ? Math.random() * (REVIVE_BOARD - 0.6) : Math.random() * 0.12 / speedMul();
+      const dur = reviveSlow ? 0.45 + Math.random() * 0.15 : Math.min(0.55, 0.25 + dist / (L.cs * 60)) * (0.9 + Math.random() * 0.2) / speedMul();
       // the place itself frees at once (others close up); the passenger steps out from where they stood
       flights.push({ color: e.color, bus: e.bus, cell: -1, x0: p.x, y0: p.y, t: -wait, dur });
       if (emojiT <= 0 && emojis.length < 3 && Math.random() < 0.08) {
@@ -920,10 +928,8 @@ function apply(ev: SimEvent[]): void {
       const p = e.cell >= 0 ? cellPx(e.cell) : keyHud;
       keyFlights.push({ bus: e.bus, x0: p.x, y0: p.y, t: e.cell >= 0 ? 0 : -0.25, toHud: false });
     } else if (e.t === 'thaw') {
-      const b = vb.get(e.bus)!;
-      b.popT = clock;
-      burst(b.x, b.y - L.bw * 0.3, '#dff4ff', 14, L.u * 0.3, L.cs * 0.5, 'shard');
-      float('Thawed!', b.x, b.y - L.bw * 1.3, L.u * 0.05, '#ffffff', '#1f6fd6', 1.1);
+      // the ice cracks, slumps and drips away (drawMelts), then shatters off the bus
+      melts.set(e.bus, clock);
       sfx.crack();
     } else if (e.t === 'key') {
       // the key on a departing bus's roof flies to the counter
@@ -1103,12 +1109,17 @@ function frame(ts: number): void {
 
 /** Magnet: the bus being filled; the road waits until its passengers are aboard. */
 let magnetHold = -1;
-const simFrozen = (): boolean => !!overlay || tutorial === 0 || gathering() || armed === 'magnet' || (magnetHold >= 0 && flights.some((f) => f.bus === magnetHold));
+/** After a revive the road holds still while its passengers board (REVIVE_BOARD seconds). */
+let reviveHold = 0;
+let reviveSlow = false;
+const REVIVE_BOARD = 1.5;
+const simFrozen = (): boolean => !!overlay || reviveHold > 0 || tutorial === 0 || gathering() || armed === 'magnet' || (magnetHold >= 0 && flights.some((f) => f.bus === magnetHold));
 const tickLen = (): number => TICK / speedMul();
 
 function update(dt: number): void {
   if (state === 'playing') FalconSDK.analytics.turn.tick(dt);
   if (overlay) overlay.t += dt;
+  if (!overlay && reviveHold > 0) reviveHold = Math.max(0, reviveHold - dt);
   updateFireworks(dt, overlay?.kind === 'win', overlay?.kind === 'win' ? overlay.t : 9);
   if (overlay?.kind === 'loading' && overlay.t >= LOADING) {
     if (overlay.next === 'home') overlay = { kind: 'home', t: 0 };
@@ -1376,6 +1387,7 @@ function draw(): void {
   pt = performance.now();
   drawBuses();
   perf.buses += performance.now() - pt;
+  drawMelts();
   drawTunnels();
   drawFlights();
   drawKeys();
@@ -1861,6 +1873,70 @@ function drawFlights(): void {
   }
 }
 
+/** Thawing frozen buses: bus id → when the ice started to melt (MELT seconds). */
+const melts = new Map<number, number>();
+/** Last shown count on each frozen bus: a step down cracks a few chips off the ice. */
+const frozenSeen = new Map<number, number>();
+const MELT = 0.8;
+function drawMelts(): void {
+  const bw = L.bw;
+  for (const s of sim.inLot()) {
+    const was = frozenSeen.get(s.id);
+    if (s.frozen > 0 && was !== undefined && s.frozen < was) {
+      const b = vb.get(s.id)!;
+      b.shakeT = clock;
+      burst(b.x, b.y - bw * 0.2, '#e6f7ff', 5, L.u * 0.18, L.cs * 0.35, 'shard');
+    }
+    frozenSeen.set(s.id, s.frozen);
+  }
+  for (const [id, t0] of melts) {
+    const k = (clock - t0) / MELT;
+    const b = vb.get(id);
+    if (!b || k >= 1) {
+      melts.delete(id);
+      if (b) {
+        b.popT = clock;
+        burst(b.x, b.y - bw * 0.3, '#dff4ff', 16, L.u * 0.32, L.cs * 0.5, 'shard');
+        burst(b.x, b.y + bw * 0.4, '#8fd3ff', 8, L.u * 0.12, L.cs * 0.25, 'dot');
+        float('Thawed!', b.x, b.y - bw * 1.3, L.u * 0.05, '#ffffff', '#1f6fd6', 1.1);
+      }
+      continue;
+    }
+    // the block shrinks from the top down and clears, the bus showing through
+    const top = b.y - bw * 0.9 + bw * 1.58 * k * 0.75, bot = b.y + bw * 0.68;
+    const half = bw * 0.62 * (1 - 0.15 * k);
+    ctx.save();
+    ctx.globalAlpha = 1 - k * 0.7;
+    const ig = ctx.createLinearGradient(b.x - half, top, b.x + half, bot);
+    ig.addColorStop(0, 'rgba(225, 248, 255, 0.9)');
+    ig.addColorStop(1, 'rgba(120, 200, 245, 0.8)');
+    ctx.fillStyle = ig;
+    roundRect(ctx, b.x - half, top, half * 2, Math.max(bw * 0.1, bot - top), bw * 0.22 * (1 - k * 0.5)); ctx.fill();
+    // cracks spreading over the ice
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.lineWidth = bw * 0.05;
+    ctx.lineCap = 'round';
+    const grow = Math.min(1, k * 2.5);
+    for (let c = 0; c < 4; c++) {
+      const a = c * 1.7 + id, cx = b.x, cy = Math.max(top + bw * 0.1, b.y - bw * 0.2);
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(a) * half * 0.6 * grow, cy + Math.sin(a) * half * 0.5 * grow);
+      ctx.lineTo(cx + Math.cos(a + 0.5) * half * 0.95 * grow, cy + Math.sin(a + 0.5) * half * 0.8 * grow);
+      ctx.stroke();
+    }
+    // drips running off the bottom edge and a puddle spreading under the bus
+    ctx.fillStyle = 'rgba(120, 200, 245, 0.9)';
+    for (let d = 0; d < 4; d++) {
+      const dk = (k * 2.2 + d * 0.27) % 1;
+      const dx = b.x - half * 0.75 + (half * 1.5 * d) / 3;
+      ctx.beginPath(); ctx.ellipse(dx, bot + dk * bw * 0.35, bw * 0.045, bw * 0.07, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 0.45 * Math.min(1, k * 2);
+    ctx.beginPath(); ctx.ellipse(b.x, bot + bw * 0.12, half * (0.6 + 0.5 * k), bw * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
 function drawParticles(): void {
   for (const p of particles) {
     const a = Math.max(0, 1 - p.t / p.life);
@@ -2276,6 +2352,33 @@ function buildWinCut(): void {
   winCut = c;
 }
 
+/** A popup picture on black (failed.jpg, jam.jpg) with its backdrop keyed out, built once loaded. */
+const keyCuts = new Map<HTMLImageElement, HTMLCanvasElement>();
+function keyCut(img: HTMLImageElement): HTMLCanvasElement | null {
+  let c = keyCuts.get(img);
+  if (c) return c;
+  if (!img.complete || !img.naturalWidth) return null;
+  c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const g = c.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const m = Math.max(px[i], px[i + 1], px[i + 2]);
+    if (m < 34) px[i + 3] = Math.max(0, Math.round(((m - 10) / 24) * 255));
+  }
+  g.putImageData(d, 0, 0);
+  keyCuts.set(img, c);
+  return c;
+}
+
+/** Places a W0 × H0 popup picture in the phone column, centred a little above the middle. */
+function popupFrame(W0: number, H0: number, maxH = 0.8): { s: number; P: (x: number, y: number) => Pt; R: (x0: number, y0: number, x1: number, y1: number) => Rect; ox: number; oy: number } {
+  const s = Math.min((L.cw * 0.98) / W0, (L.h * maxH) / H0);
+  const ox = L.w / 2 - (W0 * s) / 2, oy = L.h * 0.46 - (H0 * s) / 2;
+  return { s, ox, oy, P: (x, y) => ({ x: ox + x * s, y: oy + y * s }), R: (x0, y0, x1, y1) => ({ x: ox + x0 * s, y: oy + y0 * s, w: (x1 - x0) * s, h: (y1 - y0) * s }) };
+}
+
 /** Fireworks over the clear screen: bursts of sparks for the first two seconds. */
 let fireworks: { x: number; y: number; vx: number; vy: number; t: number; life: number; c: string }[] = [];
 let fireT = 0;
@@ -2409,45 +2512,36 @@ function drawOverlay(o: Overlay): void {
     pillButton(ctx, b, 'Got it!');
     buttons.push({ id: 'intro', r: b });
   } else if (o.kind === 'revive') {
-    const r = cardRect(u * 1.0);
-    const close = popupCard(ctx, r, 'Traffic Jam!', u);
-    outlinedText(ctx, sim.progress(total) >= 70 ? 'So close! Keep going?' : 'The road is jammed!', L.w / 2, r.y + u * 0.14, u * 0.045, '#ffd21f', INK);
-    const ty = r.y + u * 0.36, ts = u * 0.28;
-    iconTile(ctx, L.w / 2 - u * 0.19, ty, ts);
-    boosterIcon(ctx, 'slot', L.w / 2 - u * 0.19, ty, ts * 0.36);
-    iconTile(ctx, L.w / 2 + u * 0.19, ty, ts);
-    boosterIcon(ctx, 'broom', L.w / 2 + u * 0.19, ty, ts * 0.36);
-    outlinedText(ctx, '+', L.w / 2, ty, u * 0.08, '#ffd21f', '#9a5a00');
-    infoBox(ctx, { x: r.x + u * 0.06, y: r.y + u * 0.55, w: r.w - u * 0.12, h: u * 0.15 }, ['Revive: every bus on the road', 'fills up with its passengers!'], u * 0.035);
-    const b: Rect = { x: L.w / 2 - r.w * 0.36, y: r.y + r.h - u * 0.2, w: r.w * 0.72, h: u * 0.12 };
-    pillButton(ctx, b, o.busy ? '…' : FalconSDK.ads.enabled ? 'Revive' : 'Revive Free', 'green', FalconSDK.ads.enabled);
+    // Traffic Jam! (src/assets/jam.jpg, 1086 × 1448): the art carries the title, the text and the button
+    const f = popupFrame(1086, 1448);
+    const cut = keyCut(jamImg);
+    if (cut) ctx.drawImage(cut, f.ox, f.oy, 1086 * f.s, 1448 * f.s);
+    const b = f.R(205, 1146, 882, 1310);
+    // with ads on, the button says so (the art reads "Revive Free")
+    if (FalconSDK.ads.enabled || o.busy) pillButton(ctx, { x: b.x + b.w * 0.02, y: b.y + b.h * 0.06, w: b.w * 0.96, h: b.h * 0.8 }, o.busy ? '…' : 'Revive', 'green', FalconSDK.ads.enabled);
     buttons.push({ id: 'revive', r: b });
-    if (close) buttons.push({ id: 'giveup', r: close });
+    buttons.push({ id: 'giveup', r: f.R(937, 437, 1057, 557) });
   } else if (o.kind === 'fail') {
-    const cy = L.h * 0.42;
-    ribbon(ctx, L.w / 2, cy - u * 0.42, Math.min(L.cw * 0.8, u * 0.8), u * 0.15, 'Level Failed', 'purple');
-    drawMascot(ctx, L.w / 2, cy - u * 0.08, u * 0.42, -1, clock);
-    // speech bubble
-    ctx.fillStyle = '#ffffff';
-    roundRect(ctx, L.w / 2 + u * 0.16, cy - u * 0.33, u * 0.26, u * 0.1, u * 0.04); ctx.fill();
-    ctx.fillStyle = '#26305f';
-    ctx.font = `800 ${u * 0.026}px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.fillText('Try again!', L.w / 2 + u * 0.29, cy - u * 0.295);
-    ctx.fillText('You got this!', L.w / 2 + u * 0.29, cy - u * 0.26);
+    // Level Failed (src/assets/failed.jpg, 1176 × 1337); the bar shows how much of the picture was collected
+    const f = popupFrame(1176, 1337, 0.72);
+    const cut = keyCut(failedImg);
+    if (cut) ctx.drawImage(cut, f.ox, f.oy, 1176 * f.s, 1337 * f.s);
     const pct = sim.progress(total);
-    const bw = Math.min(L.cw * 0.7, u * 0.62), by = cy + u * 0.3;
-    ctx.fillStyle = '#ffffff';
-    roundRect(ctx, L.w / 2 - bw / 2 - 3, by - 3, bw + 6, u * 0.05 + 6, u * 0.03); ctx.fill();
-    ctx.fillStyle = '#c9cfe6';
-    roundRect(ctx, L.w / 2 - bw / 2, by, bw, u * 0.05, u * 0.025); ctx.fill();
-    ctx.fillStyle = '#4fd23a';
-    roundRect(ctx, L.w / 2 - bw / 2, by, Math.max(u * 0.05, (bw * pct) / 100), u * 0.05, u * 0.025); ctx.fill();
-    outlinedText(ctx, `${pct}%`, L.w / 2, by + u * 0.025, u * 0.035, '#ffffff', INK);
-    outlinedText(ctx, 'of the picture collected', L.w / 2, by - u * 0.035, u * 0.032, '#ffffff', INK);
-    const b: Rect = { x: L.w / 2 - u * 0.25, y: by + u * 0.12, w: u * 0.5, h: u * 0.13 };
-    pillButton(ctx, b, 'Retry');
-    buttons.push({ id: 'retry', r: b });
+    const tr = f.R(160, 927, 1005, 1005);
+    ctx.fillStyle = '#d5dae6';
+    roundRect(ctx, tr.x, tr.y, tr.w, tr.h, tr.h / 2); ctx.fill();
+    const fw = Math.max(tr.h, tr.w * Math.min(1, Math.min(o.t / 0.6, 1) * pct / 100));
+    const gg = ctx.createLinearGradient(0, tr.y, 0, tr.y + tr.h);
+    gg.addColorStop(0, '#8af05a');
+    gg.addColorStop(0.5, '#45c92c');
+    gg.addColorStop(1, '#2a9e1c');
+    ctx.fillStyle = gg;
+    roundRect(ctx, tr.x, tr.y, fw, tr.h, tr.h / 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+    roundRect(ctx, tr.x + tr.h * 0.3, tr.y + tr.h * 0.14, Math.max(0, fw - tr.h * 0.6), tr.h * 0.22, tr.h * 0.11); ctx.fill();
+    const shown = Math.round(pct * Math.min(1, o.t / 0.6));
+    outlinedText(ctx, `${shown}%`, tr.x + tr.w / 2, tr.y + tr.h / 2 + 1, tr.h * 0.62, '#ffffff', '#1d2a6e');
+    buttons.push({ id: 'retry', r: f.R(225, 1056, 940, 1275) });
   } else if (o.kind === 'win') {
     drawWin(o.t);
   }
@@ -2992,7 +3086,10 @@ async function onButton(id: string): Promise<void> {
     revives++;
     state = 'playing';
     // every bus on the road fills up with its colour from the board and drives off
+    reviveSlow = true;
     apply(sim.reviveFill());
+    reviveSlow = false;
+    reviveHold = REVIVE_BOARD;
     sfx.merge();
     sfx.booster();
     float('Revived!', L.w / 2, px(0, sim.geo.ym).y - L.u * 0.08, L.u * 0.07, '#ffffff', '#16842a', 1.3);
@@ -3180,7 +3277,7 @@ if (import.meta.env.DEV) {
       level, state, overlay: overlay?.kind ?? null, dev: !!devPrompt, slots: sim.slots, road: sim.onRoad().length,
       lot: sim.inLot().length, units: sim.totalUnits(), total, progress: sim.progress(total), tutorial, speed: speedMul(),
       counts: { ...boosterCounts }, armed, buttons: buttons.map((b) => b.id), album: album.length,
-      fronts: sim.fronts().map((f) => ({ id: f.id, ...busPos(f.id), color: f.color, cap: f.cap })),
+      fronts: sim.fronts().map((f) => ({ id: f.id, ...busPos(f.id), color: f.color, cap: f.cap, frozen: sim.buses[f.id].frozen })),
     }),
   };
 }
